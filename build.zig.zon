@@ -1,0 +1,17 @@
+.{
+    .name = .tokenise,
+    .version = "0.0.0",
+    .fingerprint = 0xa612b4d656683d76, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .zg = .{
+            .url = "https://codeberg.org/atman/zg/archive/v0.13.4.tar.gz",
+            .hash = "zg-0.13.4-AAAAAAiZ7QL-QuOf0UHIT9fVz2mUUwm7RyUwM-aHiPmb",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
