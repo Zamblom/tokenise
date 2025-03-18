@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
+    lib.use_llvm = false;
+
     lib.root_module.addImport("grapheme", zg.module("grapheme"));
     lib.root_module.addImport("PropsData", zg.module("PropsData"));
 
