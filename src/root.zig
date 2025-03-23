@@ -1,24 +1,106 @@
+//! # Tokenise
+//!
+//! A flexible lexical analyser (tokeniser) for parsing text into configurable token types.
+//!
+//! `tokenise` allows you to split text into tokens based on customisable rules for special characters,
+//! delimiters, and comments. It's designed to be flexible enough to handle various syntax styles
+//! while remaining simple to configure.
+//!
+//! ## Basic Usage
+//!
+//! The following example demonstrates how to configure a tokeniser with common syntax elements
+//! and process a simple code snippet:
+//!
+//! ```
+//! use tokenise::Tokeniser;
+//!
+//! fn main() {
+//!     // Create a new tokeniser
+//!     let mut tokeniser = Tokeniser::new();
+//!
+//!     // Configure tokeniser with rules
+//!     tokeniser.add_specials(".,;:!?");
+//!     tokeniser.add_delimiter_pairs(&vec!["()", "[]", "{}"]).unwrap();
+//!     tokeniser.add_balanced_delimiter("\"").unwrap();
+//!     tokeniser.set_sl_comment("//").unwrap();
+//!     tokeniser.set_ml_comment("/*", "*/").unwrap();
+//!
+//!     // Tokenise some source text
+//!     let source = "let x = 42; // The answer\nprint(\"Hello world!\");";
+//!     let tokens = tokeniser.tokenise(source).unwrap();
+//!
+//!     // Work with the resulting tokens
+//!     for token in tokens {
+//!         println!("{:?}: '{}'", token.get_state(), token.value());
+//!     }
+//! }
+//! ```
+//!
+//! ## Features
+//!
+//! - Unicode support (using grapheme clusters)
+//! - Configurable special characters and delimiters
+//! - Support for paired delimiters (e.g., parentheses, brackets)
+//! - Support for balanced delimiters (e.g., quotation marks)
+//! - Single-line and multi-line comment handling
+//! - Whitespace and newline preservation
+//!
+//! ## Token Types
+//!
+//! The tokeniser recognises several token types represented by the `TokenState` enum:
+//!
+//! - `Word`: Non-special character sequences (anything not identified as a special character or whitespace)
+//! - `LDelimiter`/`RDelimiter`: Left/right delimiters of a pair (e.g., '(', ')')
+//! - `BDelimiter`: Balanced delimiters (e.g., quotation marks)
+//! - `SymbolString`: Special characters
+//! - `NewLine`: Line breaks
+//! - `WhiteSpace`: Spaces, tabs, etc.
+//! - `SLComment`: Single-line comments
+//! - `MLComment`: Multi-line comments
+//!
+//! More precise definitions can be found in the documentation for each specific type.
+
 const std = @import("std");
 
 const grapheme = @import("grapheme");
 const PropsData = @import("PropsData");
 
-// TODO: add multi-character Parenthesis
+/// Represents the type of a token in the tokenisation process.
+///
+/// Each token in the parsed text is classified as one of these types,
+/// which determines how it is interpreted and processed.
 pub const TokenState = enum {
+    /// A sequence of non-special characters (excluding whitespace).
     word,
-    left_delimiter,
-    right_delimiter,
+    /// A start delimiter of a pair (e.g., opening bracket).
+    start_delimiter,
+    /// An end delimiter of a pair (e.g., closing bracket).
+    end_delimiter,
+    /// A balanced delimiter that can open or close (e.g., quotation mark).
     balanced_delimiter,
+    /// A sequence of special characters not recognized as delimiters or comments.
     symbol_string,
+    /// A newline character sequence (\n, \r, or \r\n).
     new_line,
+    /// A sequence of whitespace characters (excluding newlines).
     whitespace,
+    /// A single-line comment.
     single_line_comment,
+    /// A multi-line comment.
     multi_line_comment,
+    /// A null state. Never emitted.
     none,
 };
 
+/// Represents a token extracted from the source text during tokenisation.
+///
+/// Each token has a state (type), and a string value.
+///
+/// The value slice is owned by the token and must be freed.
 pub const Token = struct {
+    /// The type of the token.
     state: TokenState,
+    /// The string content of the token.
     value: []const u8,
 
     pub fn deinit(self: @This(), gpa: std.mem.Allocator) void {
@@ -46,35 +128,35 @@ pub const Token = struct {
     }
 };
 
-/// A single grapheme
-const Grphm = []const u8;
+/// A single grapheme cluster
+///
+/// This name is for readability only; its just a slice of `u8`.
+const GraphemeCluster = []const u8;
 
-/// A slice of graphemes
-const Str = []const Grphm;
-
-/// Frees a Str
-fn strFree(gpa: std.mem.Allocator, s: Str) void {
+/// Frees a slice of `GraphemeCluster`
+fn freeGraphemeClusters(gpa: std.mem.Allocator, s: []const GraphemeCluster) void {
     for (s) |g| gpa.free(g);
     gpa.free(s);
 }
 
 /// Returns `true` if `a` and `b` are equal, else `false`.
-fn strEql(a: Str, b: Str) bool {
+fn graphemeClusterEql(a: []const GraphemeCluster, b: []const GraphemeCluster) bool {
     if (a.len != b.len) return false;
     for (a, b) |i, j| if (!std.mem.eql(u8, i, j)) return false;
     return true;
 }
 
 /// Returns `true` if `a` ends with `b`, else `false`.
-fn strEndsWith(a: Str, b: Str) bool {
+fn graphemeClustersEndWith(a: []const GraphemeCluster, b: []const GraphemeCluster) bool {
     if (a.len < b.len) return false;
     const a_relevant = a[a.len - b.len ..];
-    return strEql(a_relevant, b);
+    return graphemeClusterEql(a_relevant, b);
 }
 
-/// Splits a byte slice into its individual graphemes.
-/// Caller owns the returned slice of slices.
-fn bytesToStr(gpa: std.mem.Allocator, grapheme_data: *const grapheme.GraphemeData, bytes: []const u8) std.mem.Allocator.Error![]const Grphm {
+/// Splits a slice of `u8` into a slice of `GraphemeCluster`.
+///
+/// Caller owns the returned slice.
+fn toGraphemeClusters(gpa: std.mem.Allocator, grapheme_data: *const grapheme.GraphemeData, bytes: []const u8) std.mem.Allocator.Error![]const GraphemeCluster {
     var graphemes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer graphemes.deinit(gpa);
 
@@ -88,9 +170,10 @@ fn bytesToStr(gpa: std.mem.Allocator, grapheme_data: *const grapheme.GraphemeDat
     return try graphemes.toOwnedSlice(gpa);
 }
 
-/// Combines a Str into a single byte slice.
+/// Combines a slice of `GraphemeCluster` into a slice of `u8`.
+///
 /// Caller owns the returned slice.
-fn strToBytes(gpa: std.mem.Allocator, s: Str) std.mem.Allocator.Error![]const u8 {
+fn fromGraphemeCluster(gpa: std.mem.Allocator, s: []const GraphemeCluster) std.mem.Allocator.Error![]const u8 {
     var bytes: std.ArrayListUnmanaged(u8) = .empty;
     defer bytes.deinit(gpa);
 
@@ -98,304 +181,614 @@ fn strToBytes(gpa: std.mem.Allocator, s: Str) std.mem.Allocator.Error![]const u8
     return try bytes.toOwnedSlice(gpa);
 }
 
+/// A configurable tokeniser for parsing text into meaningful tokens.
+///
+/// The `Tokeniser` can be customised with special characters, delimiter pairs,
+/// balanced delimiters, and comment markers to suit different syntax requirements.
+/// Once configured, it can parse text into tokens according to those rules.
+///
+/// Note that delimiters and the characters in comment markers are automatically
+/// treated as special characters, but with additional distinctions in how they're
+/// processed during tokenisation.
+///
+/// ### Example Start
+/// ```
+/// // Create and configure a tokeniser for a C-like language
+/// var tokeniser: Tokeniser = try .init(gpa);
+/// defer tokeniser.deinit(gpa);
+///
+/// try tokeniser.addSpecials(gpa, "+-*/=<>!&|^~%");
+/// try tokeniser.addDelimiterPairs(gpa, &.{"()", "[]", "{}"})
+/// try tokeniser.setSingleLineComment(gpa, "//");
+/// try tokeniser.setMultiLineComment(gpa, "/*", "*/");
+///
+/// // Tokenise some code
+/// let code = "int main() { // Entry point\n    return 0;\n}";
+/// let tokens = try tokeniser.tokenise(code);
+/// ```
+/// ### Example End
 pub const Tokeniser = struct {
-    special_characters: []const Grphm,
-    delimiter_pairs: []const [2]Grphm,
-    balanced_delimiters: []const Grphm,
-    single_line_comment: ?Str,
-    multi_line_comment: ?[2]Str,
+    specials: std.StringHashMapUnmanaged(void) = .empty,
+    start_delimiters: std.StringHashMapUnmanaged(void) = .empty,
+    end_delimiters: std.StringHashMapUnmanaged(void) = .empty,
+    balanced_delimiters: std.StringHashMapUnmanaged(void) = .empty,
+    single_line_comment: ?[]const GraphemeCluster = null,
+    multi_line_comment: ?[2][]const GraphemeCluster = null,
     grapheme_data: grapheme.GraphemeData,
     props_data: PropsData,
 
     pub const InitError = error{
-        DelimiterPairsPairLengthMustBeTwo,
-        SpecialCharactersMustNotBeNewLines,
-        SpecialCharactersMustNotBeWhitespace,
-        DelimitersPairStartsMustBeSpecial,
-        DelimitersPairEndsMustBeSpecial,
-        BalancedDelimitersMustBeSpecial,
-        BalancedDelimitersMustNotBeDelimiterPairStarts,
-        BalancedDelimitersMustNotBeDelimiterPairEnds,
-        SingleLineCommentMustBeLongerThanZero,
-        SingleLineCommentMustBeEntirelySpecial,
-        SingleLineCommentMustNotIncludeDelimiterPairStarts,
-        SingleLineCommentMustNotIncludeDelimiterPairEnds,
-        SingleLineCommentMustNotIncludeBalancedDelimiters,
-        SingleLineCommentMustNotContainMultiLineCommentStart,
-        SingleLineCommentMustNotContainMultiLineCommentEnd,
-        MultiLineCommentStartMustBeLongerThanZero,
-        MultiLineCommentStartMustBeEntirelySpecial,
-        MultiLineCommentStartMustNotIncludeDelimiterPairStarts,
-        MultiLineCommentStartMustNotIncludeDelimiterPairEnds,
-        MultiLineCommentStartMustNotIncludeBalancedDelimiters,
-        MultiLineCommentEndMustBeLongerThanZero,
-        MultiLineCommentEndMustBeEntirelySpecial,
-        MultiLineCommentEndMustNotIncludeDelimiterPairStarts,
-        MultiLineCommentEndMustNotIncludeDelimiterPairEnds,
-        MultiLineCommentEndMustNotIncludeBalancedDelimiters,
-        MultiLineCommentStartMustNotContainSingleLineComment,
-        MultiLineCommentEndMustNotContainSingleLineComment,
         GraphemeDataFailedToInit,
         PropsDataFailedToInit,
+    };
+
+    pub const SetupError = error{
+        CommentsCannotBeZeroLength,
+        CommentsCannotContainDelimiters,
+        DelimiterAlreadyExists,
+        DelimitersMustBeSingleGraphemeClusters,
+        PairedDelimitersCannotMatch,
+        PairedDelimitersMustBeDualGraphemeClusters,
+        SpecialsMustBeSingleGraphemeClusters,
     } || std.mem.Allocator.Error;
 
     pub const TokeniserError = error{
         MalformedText,
     } || std.mem.Allocator.Error;
 
-    // TODO: Implement build()
-    pub fn init(gpa: std.mem.Allocator, special_characters: []const u8, delimiter_pairs: []const []const u8, balanced_delimiters: []const u8, single_line_comment: ?[]const u8, multi_line_comment: ?[2][]const u8) InitError!@This() {
-        const grapheme_data: grapheme.GraphemeData = grapheme.GraphemeData.init(gpa) catch return InitError.GraphemeDataFailedToInit;
-        errdefer grapheme_data.deinit();
-
-        const props_data: PropsData = PropsData.init(gpa) catch return InitError.PropsDataFailedToInit;
-        errdefer props_data.deinit();
-
-        const special_characters_owned = try bytesToStr(gpa, &grapheme_data, special_characters);
-        errdefer strFree(gpa, special_characters_owned);
-
-        const delimiter_pairs_owned = try gpa.alloc([2]Grphm, delimiter_pairs.len);
-        errdefer gpa.free(delimiter_pairs_owned);
-
-        for (delimiter_pairs, 0..) |delimiter_pair, i| {
-            const vector = try bytesToStr(gpa, &grapheme_data, delimiter_pair);
-            defer strFree(gpa, vector);
-
-            if (vector.len != 2) return InitError.DelimiterPairsPairLengthMustBeTwo;
-
-            const left_side = try gpa.dupe(u8, vector[0]);
-            errdefer gpa.free(left_side);
-
-            const right_side = try gpa.dupe(u8, vector[1]);
-            errdefer gpa.free(right_side);
-
-            delimiter_pairs_owned[i] = .{ left_side, right_side };
-        }
-        errdefer for (delimiter_pairs_owned) |pair| {
-            gpa.free(pair[0]);
-            gpa.free(pair[1]);
+    /// Initialises a new, unconfigured `Tokeniser`.
+    ///
+    /// This constructor creates a tokeniser with no special characters, delimiters, or comment markers.
+    ///
+    /// You'll need to configure it with the appropriate methods before it's ready for use.
+    pub fn init(gpa: std.mem.Allocator) InitError!@This() {
+        return .{
+            .grapheme_data = grapheme.GraphemeData.init(gpa) catch return InitError.GraphemeDataFailedToInit,
+            .props_data = PropsData.init(gpa) catch return InitError.PropsDataFailedToInit,
         };
-
-        const balanced_delimiters_owned = try bytesToStr(gpa, &grapheme_data, balanced_delimiters);
-        errdefer strFree(gpa, balanced_delimiters_owned);
-
-        var single_line_comment_owned: ?Str = null;
-        if (single_line_comment) |slc| {
-            single_line_comment_owned = try bytesToStr(gpa, &grapheme_data, slc);
-            errdefer strFree(single_line_comment_owned);
-        }
-        errdefer if (single_line_comment_owned) |slc| strFree(gpa, slc);
-
-        var multi_line_comment_owned: ?[2]Str = null;
-        if (multi_line_comment) |mlc| {
-            const left_side = try bytesToStr(gpa, &grapheme_data, mlc[0]);
-            errdefer strFree(gpa, left_side);
-
-            const right_side = try bytesToStr(gpa, &grapheme_data, mlc[1]);
-            errdefer strFree(gpa, right_side);
-
-            multi_line_comment_owned = .{ left_side, right_side };
-        }
-        errdefer if (multi_line_comment_owned) |mlc| {
-            strFree(gpa, mlc[0]);
-            strFree(gpa, mlc[1]);
-        };
-
-        const self: @This() = .{
-            .special_characters = special_characters_owned,
-            .delimiter_pairs = delimiter_pairs_owned,
-            .balanced_delimiters = balanced_delimiters_owned,
-            .single_line_comment = single_line_comment_owned,
-            .multi_line_comment = multi_line_comment_owned,
-            .grapheme_data = grapheme_data,
-            .props_data = props_data,
-        };
-
-        try self.ensureWellFormed(gpa);
-
-        return self;
     }
 
-    pub fn deinit(self: *const @This(), gpa: std.mem.Allocator) void {
-        strFree(gpa, self.special_characters);
-        for (self.delimiter_pairs) |pair| {
-            gpa.free(pair[0]);
-            gpa.free(pair[1]);
+    /// Adds a single special character to the tokeniser.
+    ///
+    /// Special characters are treated differently from regular text during tokenisation.
+    /// They form `symbol_string` tokens unless they're also configured as delimiters or
+    /// used in comment markers.
+    ///
+    /// ### Arguments
+    ///
+    /// * `special` - The special character to add, which must be a single grapheme
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addSpecial(gpa, "@");
+    /// try tokeniser.addSpecial(gpa, "+");
+    ///
+    /// // Unicode graphemes are supported
+    /// try tokeniser.addSpecial("👨‍💻").unwrap();
+    ///
+    /// // This would return an error as it's not a single grapheme
+    /// tokeniser.addSpecial(gpa, "abc");
+    /// ```
+    /// ### Example End
+    pub fn addSpecial(self: *@This(), gpa: std.mem.Allocator, special: []const u8) SetupError!void {
+        if (!self.isSingleGraphemeCluster(special)) return SetupError.SpecialsMustBeSingleGraphemeClusters;
+        if (self.isSpecial(special)) return;
+
+        try self.specials.ensureUnusedCapacity(gpa, 1);
+        self.specials.putAssumeCapacity(try gpa.dupe(u8, special), {});
+    }
+
+    /// Adds multiple special characters to the tokeniser.
+    ///
+    /// This is a convenience method that adds each grapheme in the input string
+    /// as a special character.
+    ///
+    /// ### Arguments
+    ///
+    /// * `specials` - A string containing the special characters to add
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = .init(gpa);
+    /// try tokeniser.addSpecials("+-*/=<>!&|^~%");
+    /// ```
+    /// ### Example End
+    pub fn addSpecials(self: *@This(), gpa: std.mem.Allocator, specials: []const u8) SetupError!void {
+        const count = self.graphemeClusterCount(specials);
+        try self.specials.ensureUnusedCapacity(gpa, @intCast(count));
+
+        var it = grapheme.Iterator.init(specials, &self.grapheme_data);
+        while (it.next()) |gc| self.addSpecial(gpa, gc.bytes(specials)) catch unreachable;
+    }
+
+    /// Adds a pair of left and right delimiters to the tokeniser.
+    ///
+    /// Delimiter pairs are used to mark the beginning and end of sections in text,
+    /// such as parentheses, brackets, and braces. During tokenisation, they are
+    /// classified as `start_delimiter` and `end_delimiter` respectively.
+    ///
+    /// Both characters are automatically added as special characters if they aren't already.
+    ///
+    /// ### Arguments
+    ///
+    /// * `start` - The start (opening) delimiter, which must be a single grapheme
+    /// * `end` - The end (closing) delimiter, which must be a single grapheme
+    ///
+    /// # Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addDelimiterPair(gpa, "(", ")");
+    /// try tokeniser.addDelimiterPair(gpa, "[", "]");
+    /// try tokeniser.addDelimiterPair(gpa, "{", "}");
+    ///
+    /// // Unicode delimiters are supported
+    /// try tokeniser.addDelimiterPair(gpa, "「", "」");
+    /// ```
+    /// ### Example End
+    pub fn addDelimiterPair(self: *@This(), gpa: std.mem.Allocator, start: []const u8, end: []const u8) SetupError!void {
+        if (!self.isSingleGraphemeCluster(start)) return SetupError.DelimitersMustBeSingleGraphemeClusters;
+        if (!self.isSingleGraphemeCluster(end)) return SetupError.DelimitersMustBeSingleGraphemeClusters;
+        if (std.mem.eql(u8, start, end)) return SetupError.PairedDelimitersCannotMatch;
+        if (self.getDelimiterSide(start) != .none) return SetupError.DelimiterAlreadyExists;
+        if (self.getDelimiterSide(end) != .none) return SetupError.DelimiterAlreadyExists;
+
+        if (self.single_line_comment) |slc| {
+            for (slc) |gc| {
+                if (std.mem.eql(u8, gc, start)) return SetupError.CommentsCannotContainDelimiters;
+                if (std.mem.eql(u8, gc, end)) return SetupError.CommentsCannotContainDelimiters;
+            }
         }
-        gpa.free(self.delimiter_pairs);
-        strFree(gpa, self.balanced_delimiters);
-        if (self.single_line_comment) |slc| strFree(gpa, slc);
+
         if (self.multi_line_comment) |mlc| {
-            strFree(gpa, mlc[0]);
-            strFree(gpa, mlc[1]);
+            for (mlc[0]) |gc| {
+                if (std.mem.eql(u8, gc, start)) return SetupError.CommentsCannotContainDelimiters;
+                if (std.mem.eql(u8, gc, end)) return SetupError.CommentsCannotContainDelimiters;
+            }
+            for (mlc[1]) |gc| {
+                if (std.mem.eql(u8, gc, start)) return SetupError.CommentsCannotContainDelimiters;
+                if (std.mem.eql(u8, gc, end)) return SetupError.CommentsCannotContainDelimiters;
+            }
         }
+
+        const start_owned_delim = try gpa.dupe(u8, start);
+        errdefer gpa.free(start_owned_delim);
+        const end_owned_delim = try gpa.dupe(u8, end);
+        errdefer gpa.free(end_owned_delim);
+        const start_owned_special = try gpa.dupe(u8, start);
+        errdefer gpa.free(start_owned_special);
+        const end_owned_special = try gpa.dupe(u8, end);
+        errdefer gpa.free(end_owned_special);
+
+        try self.start_delimiters.ensureUnusedCapacity(gpa, 1);
+        try self.end_delimiters.ensureUnusedCapacity(gpa, 1);
+        try self.specials.ensureUnusedCapacity(gpa, 2);
+
+        self.start_delimiters.putAssumeCapacity(start_owned_delim, {});
+        self.end_delimiters.putAssumeCapacity(end_owned_delim, {});
+        if (!self.specials.contains(start)) self.specials.putAssumeCapacity(start_owned_special, {}) else gpa.free(start_owned_special);
+        if (!self.specials.contains(end)) self.specials.putAssumeCapacity(end_owned_special, {}) else gpa.free(end_owned_special);
+    }
+
+    /// Adds multiple delimiter pairs to the tokeniser.
+    ///
+    /// Each pair should be represented as a string containing exactly two graphemes,
+    /// where the first is the start delimiter and the second is the end delimiter.
+    ///
+    /// Each character is automatically added as a special character if it isn't already.
+    ///
+    /// ### Arguments
+    ///
+    /// * `delimiter_pairs` - A slice of strings, each containing exactly two graphemes
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addDelimiterPairs(&.{"()", "[]", "{}"});
+    /// ```
+    /// ### Example End
+    pub fn addDelimiterPairs(self: *@This(), gpa: std.mem.Allocator, pairs: []const []const u8) SetupError!void {
+        var additions_start: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer additions_start.deinit(gpa);
+        errdefer {
+            var it = additions_start.iterator();
+            while (it.next()) |gc| _ = self.start_delimiters.remove(gc.key_ptr.*);
+        }
+
+        var additions_end: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer additions_end.deinit(gpa);
+        errdefer {
+            var it = additions_end.iterator();
+            while (it.next()) |gc| _ = self.end_delimiters.remove(gc.key_ptr.*);
+        }
+
+        var additions_special: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer additions_special.deinit(gpa);
+        errdefer {
+            var it = additions_special.iterator();
+            while (it.next()) |gc| _ = self.specials.remove(gc.key_ptr.*);
+        }
+
+        try additions_start.ensureUnusedCapacity(gpa, pairs.len);
+        try additions_end.ensureUnusedCapacity(gpa, pairs.len);
+        try additions_special.ensureUnusedCapacity(gpa, pairs.len * 2);
+
+        for (pairs) |pair| {
+            var it = grapheme.Iterator.init(pair, &self.grapheme_data);
+            const start = (it.next() orelse return SetupError.PairedDelimitersMustBeDualGraphemeClusters).bytes(pair);
+            const end = (it.next() orelse return SetupError.PairedDelimitersMustBeDualGraphemeClusters).bytes(pair);
+            if (it.next() != null) return SetupError.PairedDelimitersMustBeDualGraphemeClusters;
+
+            if (!self.start_delimiters.contains(start)) additions_start.putAssumeCapacity(start, {});
+            if (!self.end_delimiters.contains(end)) additions_end.putAssumeCapacity(end, {});
+            if (!self.specials.contains(start)) additions_special.putAssumeCapacity(start, {});
+            if (!self.specials.contains(end)) additions_special.putAssumeCapacity(end, {});
+            try self.addDelimiterPair(gpa, start, end);
+        }
+    }
+
+    /// Adds a balanced delimiter to the tokeniser.
+    ///
+    /// Balanced delimiters are characters that serve as both opening and closing markers,
+    /// such as quotation marks. During tokenisation, they are classified as `balanced_delimiter`.
+    ///
+    /// The character is automatically added as a special character if it isn't already.
+    ///
+    /// ### Arguments
+    ///
+    /// * `balanced` - The balanced delimiter, which must be a single grapheme
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addBalancedDelimiter(gpa, "\""); // Double quote
+    /// try tokeniser.addBalancedDelimiter(gpa, "'");  // Single quote
+    /// try tokeniser.addBalancedDelimiter(gpa, "`");  // Backtick
+    /// ```
+    /// ### Example End
+    pub fn addBalancedDelimiter(self: *@This(), gpa: std.mem.Allocator, balanced: []const u8) SetupError!void {
+        if (!self.isSingleGraphemeCluster(balanced)) return SetupError.DelimitersMustBeSingleGraphemeClusters;
+        if (self.getDelimiterSide(balanced) != .none) return SetupError.DelimiterAlreadyExists;
+
+        if (self.single_line_comment) |slc| {
+            for (slc) |gc| if (std.mem.eql(u8, gc, balanced)) return SetupError.CommentsCannotContainDelimiters;
+        }
+
+        if (self.multi_line_comment) |mlc| {
+            for (mlc[0]) |gc| if (std.mem.eql(u8, gc, balanced)) return SetupError.CommentsCannotContainDelimiters;
+            for (mlc[1]) |gc| if (std.mem.eql(u8, gc, balanced)) return SetupError.CommentsCannotContainDelimiters;
+        }
+
+        const balanced_owned_delim = try gpa.dupe(u8, balanced);
+        const balanced_owned_special = try gpa.dupe(u8, balanced);
+
+        try self.balanced_delimiters.ensureUnusedCapacity(gpa, 1);
+        try self.specials.ensureUnusedCapacity(gpa, 1);
+
+        self.balanced_delimiters.putAssumeCapacity(balanced_owned_delim, {});
+        if (!self.specials.contains(balanced)) self.specials.putAssumeCapacity(balanced_owned_special, {}) else gpa.free(balanced_owned_special);
+    }
+
+    /// Adds multiple balanced delimiters to the tokeniser.
+    ///
+    /// Each character in the input string is added as a balanced delimiter.
+    /// The characters are automatically added as special characters if they aren't already.
+    ///
+    /// ### Arguments
+    ///
+    /// * `balanced_delimiters` - A string containing the balanced delimiters to add
+    ///
+    /// ### Example Start
+    ///
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addBalancedDelimiters(gpa, "\"'`"); // Adds ", ', and ` as balanced delimiters
+    /// ```
+    /// ### Example End
+    pub fn addBalancedDelimiters(self: *@This(), gpa: std.mem.Allocator, balanced_delimiters: []const u8) SetupError!void {
+        var additions_balanced: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer additions_balanced.deinit(gpa);
+        errdefer {
+            var it = additions_balanced.iterator();
+            while (it.next()) |gc| _ = self.balanced_delimiters.remove(gc.key_ptr.*);
+        }
+
+        var additions_special: std.StringArrayHashMapUnmanaged(void) = .empty;
+        defer additions_special.deinit(gpa);
+        errdefer {
+            var it = additions_special.iterator();
+            while (it.next()) |gc| _ = self.specials.remove(gc.key_ptr.*);
+        }
+
+        const count = self.graphemeClusterCount(balanced_delimiters);
+        try additions_balanced.ensureUnusedCapacity(gpa, count);
+        try additions_special.ensureUnusedCapacity(gpa, count);
+
+        var it = grapheme.Iterator.init(balanced_delimiters, &self.grapheme_data);
+        while (it.next()) |gc| {
+            const balanced_owned = gc.bytes(balanced_delimiters);
+            if (!self.balanced_delimiters.contains(balanced_owned)) additions_balanced.putAssumeCapacity(balanced_owned, {});
+            if (!self.specials.contains(balanced_owned)) additions_special.putAssumeCapacity(balanced_owned, {});
+            try self.addBalancedDelimiter(gpa, balanced_owned);
+        }
+    }
+
+    /// Sets the marker for single-line comments.
+    ///
+    /// Single-line comments run from the marker to the end of the line.
+    /// During tokenisation, they are classified as `single_line_comment`.
+    ///
+    /// All characters in the comment marker are automatically added as special characters.
+    ///
+    /// ### Arguments
+    ///
+    /// * `comm` - The single-line comment marker (e.g., "//")
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa)
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.setSingleLineComment(gpa, "//");  // C/C++/Rust/Zig style
+    ///
+    /// // Could also use other styles
+    /// // try tokeniser.setSingleLineComment(gpa, "#").unwrap();   // Python/Ruby style
+    /// // try tokeniser.setSingleLineComment(gpa, "--").unwrap();  // SQL/Lua style
+    /// ```
+    /// ### Example End
+    pub fn setSingleLineComment(self: *@This(), gpa: std.mem.Allocator, start: []const u8) SetupError!void {
+        if (start.len == 0) return SetupError.CommentsCannotBeZeroLength;
+
+        const gcs_slc = try toGraphemeClusters(gpa, &self.grapheme_data, start);
+        errdefer freeGraphemeClusters(gpa, gcs_slc);
+        for (gcs_slc) |gc| if (self.getDelimiterSide(gc) != .none) return SetupError.CommentsCannotContainDelimiters;
+
+        const gcs_specials = try toGraphemeClusters(gpa, &self.grapheme_data, start);
+        defer gpa.free(gcs_specials);
+
+        try self.specials.ensureUnusedCapacity(gpa, @intCast(gcs_specials.len));
+
+        // Free existing single_line_comment if present.
+        if (self.single_line_comment) |slc| freeGraphemeClusters(gpa, slc);
+
+        // Set single_line_comment and add each grapheme cluster to specials.
+        self.single_line_comment = gcs_slc;
+        for (gcs_specials) |gc| {
+            if (!self.specials.contains(gc)) self.specials.putAssumeCapacity(gc, {}) else gpa.free(gc);
+        }
+    }
+
+    /// Sets the markers for multi-line comments.
+    ///
+    /// Multi-line comments run from the start marker to the end marker,
+    /// potentially spanning multiple lines. During tokenisation, they
+    /// are classified as `multi_line_comment`.
+    ///
+    /// All characters in both comment markers are automatically added as special characters.
+    ///
+    /// ### Arguments
+    ///
+    /// * `start` - The start marker for multi-line comments (e.g., "/*")
+    /// * `end` - The end marker for multi-line comments (e.g., "*/")
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.setMultiLineComment(gpa, "/*", "*/");  // C/C++/Rust style
+    ///
+    /// // Could also use other styles
+    /// // try tokeniser.setMultiLineComment(gpa, "<!--", "-->"); // HTML/XML style
+    /// // try tokeniser.setMultiLineComment(gpa, "{-", "-}");    // Haskell style
+    /// ```
+    /// ### Example End
+    ///
+    /// ### Warning Start
+    /// Be cautious with comment markers that contain alphanumeric characters (like words).
+    /// Since all characters in comment markers are added as special characters, using
+    /// word-based markers may cause unexpected tokenisation of normal text:
+    ///
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// // Not recommended - would treat the letters in "begin" and "end" as special characters
+    /// try tokeniser.setMultiLineComment("=begin", "=end").unwrap(); // Ruby style
+    /// ```
+    /// ### Warning End
+    pub fn setMultiLineComment(self: *@This(), gpa: std.mem.Allocator, start: []const u8, end: []const u8) SetupError!void {
+        if (start.len == 0) return SetupError.CommentsCannotBeZeroLength;
+        if (end.len == 0) return SetupError.CommentsCannotBeZeroLength;
+
+        const gcs_mlc_start = try toGraphemeClusters(gpa, &self.grapheme_data, start);
+        errdefer freeGraphemeClusters(gpa, gcs_mlc_start);
+        for (gcs_mlc_start) |gc| if (self.getDelimiterSide(gc) != .none) return SetupError.CommentsCannotContainDelimiters;
+
+        const gcs_mlc_end = try toGraphemeClusters(gpa, &self.grapheme_data, end);
+        errdefer freeGraphemeClusters(gpa, gcs_mlc_end);
+        for (gcs_mlc_start) |gc| if (self.getDelimiterSide(gc) != .none) return SetupError.CommentsCannotContainDelimiters;
+
+        const gcs_specials_start = try toGraphemeClusters(gpa, &self.grapheme_data, start);
+        defer gpa.free(gcs_specials_start);
+
+        const gcs_specials_end = try toGraphemeClusters(gpa, &self.grapheme_data, end);
+        defer gpa.free(gcs_specials_end);
+
+        try self.specials.ensureUnusedCapacity(gpa, @intCast(gcs_specials_start.len + gcs_specials_end.len));
+
+        // Free existing multi_line_comment if present.
+        if (self.multi_line_comment) |mlc| {
+            freeGraphemeClusters(gpa, mlc[0]);
+            freeGraphemeClusters(gpa, mlc[1]);
+        }
+
+        // Set multi_line_comment and add each grapheme cluster to specials.
+        self.multi_line_comment = .{ gcs_mlc_start, gcs_mlc_end };
+        for (gcs_specials_start) |gc| {
+            if (!self.specials.contains(gc)) self.specials.putAssumeCapacity(gc, {}) else gpa.free(gc);
+        }
+        for (gcs_specials_end) |gc| {
+            if (!self.specials.contains(gc)) self.specials.putAssumeCapacity(gc, {}) else gpa.free(gc);
+        }
+    }
+
+    /// Frees all memory allocated during setup.
+    ///
+    /// This function should be called after tokenisation is complete.
+    pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+        var special_it = self.specials.iterator();
+        while (special_it.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.specials.deinit(gpa);
+
+        var start_it = self.start_delimiters.iterator();
+        while (start_it.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.start_delimiters.deinit(gpa);
+
+        var end_it = self.end_delimiters.iterator();
+        while (end_it.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.end_delimiters.deinit(gpa);
+
+        var balanced_it = self.balanced_delimiters.iterator();
+        while (balanced_it.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.balanced_delimiters.deinit(gpa);
+
+        if (self.single_line_comment) |slc| freeGraphemeClusters(gpa, slc);
+
+        if (self.multi_line_comment) |mlc| {
+            freeGraphemeClusters(gpa, mlc[0]);
+            freeGraphemeClusters(gpa, mlc[1]);
+        }
+
         self.grapheme_data.deinit();
         self.props_data.deinit();
     }
 
-    /// Checks that the given `Tokeniser` is well formed.
-    /// Returns the relevant error
-    fn ensureWellFormed(self: *const @This(), gpa: std.mem.Allocator) InitError!void {
-        // Special Character must not be newlines or whitespace.
-        for (self.special_characters) |special| {
-            if (self.isNewLine(special)) return InitError.SpecialCharactersMustNotBeNewLines;
-            if (self.isWhitespace(special)) return InitError.SpecialCharactersMustNotBeWhitespace;
-        }
+    /// Returns the number of grapheme clusters in the given string.
+    fn graphemeClusterCount(self: *const @This(), s: []const u8) usize {
+        var count: usize = 0;
+        var it = grapheme.Iterator.init(s, &self.grapheme_data);
+        while (it.next() != null) count += 1;
+        return count;
+    }
 
-        // Delimiters Pairs must be entirely special.
-        for (self.delimiter_pairs) |pair| {
-            if (!self.isSpecial(pair[0])) return InitError.DelimitersPairStartsMustBeSpecial;
-            if (!self.isSpecial(pair[1])) return InitError.DelimitersPairEndsMustBeSpecial;
-        }
-
-        // Balanced Delimiters must be special and not within Delimiter Pairs.
-        for (self.balanced_delimiters) |delimiter| {
-            if (!self.isSpecial(delimiter)) return InitError.BalancedDelimitersMustBeSpecial;
-            for (self.delimiter_pairs) |pair| {
-                if (std.mem.eql(u8, delimiter, pair[0])) return InitError.BalancedDelimitersMustNotBeDelimiterPairStarts;
-                if (std.mem.eql(u8, delimiter, pair[1])) return InitError.BalancedDelimitersMustNotBeDelimiterPairEnds;
-            }
-        }
-
-        // Single Line Comments must be entirely special, must not contain delimiters, and must not contain multi line comments.
-        if (self.single_line_comment) |slc| {
-            if (slc.len == 0) return InitError.SingleLineCommentMustBeLongerThanZero;
-            for (slc) |g| {
-                if (!self.isSpecial(g)) return InitError.SingleLineCommentMustBeEntirelySpecial;
-                for (self.delimiter_pairs) |pair| {
-                    if (std.mem.eql(u8, g, pair[0])) return InitError.SingleLineCommentMustNotIncludeDelimiterPairStarts;
-                    if (std.mem.eql(u8, g, pair[1])) return InitError.SingleLineCommentMustNotIncludeDelimiterPairEnds;
-                }
-                for (self.balanced_delimiters) |delimiter| {
-                    if (std.mem.eql(u8, g, delimiter)) return InitError.SingleLineCommentMustNotIncludeBalancedDelimiters;
-                }
-            }
-            if (self.multi_line_comment) |mlc| {
-                const slc_bytes = try strToBytes(gpa, slc);
-                defer gpa.free(slc_bytes);
-
-                const mlc_start_bytes = try strToBytes(gpa, mlc[0]);
-                defer gpa.free(mlc_start_bytes);
-
-                const mlc_end_bytes = try strToBytes(gpa, mlc[1]);
-                defer gpa.free(mlc_end_bytes);
-
-                if (std.mem.containsAtLeast(u8, slc_bytes, 1, mlc_start_bytes)) return InitError.SingleLineCommentMustNotContainMultiLineCommentStart;
-                if (std.mem.containsAtLeast(u8, slc_bytes, 1, mlc_end_bytes)) return InitError.SingleLineCommentMustNotContainMultiLineCommentEnd;
-            }
-        }
-
-        // Multi Line Comments must be entirely special, must not contain delimiters, and must not contain single line comments.
-        if (self.multi_line_comment) |mlc| {
-            if (mlc[0].len == 0) return InitError.MultiLineCommentStartMustBeLongerThanZero;
-            if (mlc[1].len == 0) return InitError.MultiLineCommentEndMustBeLongerThanZero;
-            for (mlc[0]) |g| {
-                if (!self.isSpecial(g)) return InitError.MultiLineCommentStartMustBeEntirelySpecial;
-                for (self.delimiter_pairs) |pair| {
-                    if (std.mem.eql(u8, g, pair[0])) return InitError.MultiLineCommentStartMustNotIncludeDelimiterPairStarts;
-                    if (std.mem.eql(u8, g, pair[1])) return InitError.MultiLineCommentStartMustNotIncludeDelimiterPairEnds;
-                }
-                for (self.balanced_delimiters) |delimiter| {
-                    if (std.mem.eql(u8, g, delimiter)) return InitError.MultiLineCommentStartMustNotIncludeBalancedDelimiters;
-                }
-            }
-            for (mlc[1]) |g| {
-                if (!self.isSpecial(g)) return InitError.MultiLineCommentEndMustBeEntirelySpecial;
-                for (self.delimiter_pairs) |pair| {
-                    if (std.mem.eql(u8, g, pair[0])) return InitError.MultiLineCommentEndMustNotIncludeDelimiterPairStarts;
-                    if (std.mem.eql(u8, g, pair[1])) return InitError.MultiLineCommentEndMustNotIncludeDelimiterPairEnds;
-                }
-                for (self.balanced_delimiters) |delimiter| {
-                    if (std.mem.eql(u8, g, delimiter)) return InitError.MultiLineCommentEndMustNotIncludeBalancedDelimiters;
-                }
-            }
-            if (self.single_line_comment) |slc| {
-                const mlc_start_bytes = try strToBytes(gpa, mlc[0]);
-                defer gpa.free(mlc_start_bytes);
-
-                const mlc_end_bytes = try strToBytes(gpa, mlc[1]);
-                defer gpa.free(mlc_end_bytes);
-
-                const slc_bytes = try strToBytes(gpa, slc);
-                defer gpa.free(slc_bytes);
-
-                if (std.mem.containsAtLeast(u8, mlc_start_bytes, 1, slc_bytes)) return InitError.MultiLineCommentStartMustNotContainSingleLineComment;
-                if (std.mem.containsAtLeast(u8, mlc_end_bytes, 1, slc_bytes)) return InitError.MultiLineCommentEndMustNotContainSingleLineComment;
-            }
-        }
+    /// Returns whether the given string consists of exactly one grapheme cluster.
+    fn isSingleGraphemeCluster(self: *const @This(), s: []const u8) bool {
+        var it = grapheme.Iterator.init(s, &self.grapheme_data);
+        return (it.next() orelse return false).len == s.len;
     }
 
     /// Returns whether the given grapheme was marked as special during init.
-    fn isSpecial(self: *const @This(), g: Grphm) bool {
-        for (self.special_characters) |s_g| if (std.mem.eql(u8, s_g, g)) return true;
-        return false;
+    fn isSpecial(self: *const @This(), g: GraphemeCluster) bool {
+        return self.specials.contains(g);
     }
 
     /// Returns whether the given grapheme is a newline.
-    fn isNewLine(self: *const @This(), g: Grphm) bool {
+    fn isNewLine(self: *const @This(), g: GraphemeCluster) bool {
         _ = self;
         return std.mem.eql(u8, "\r", g) or std.mem.eql(u8, "\r\n", g) or std.mem.eql(u8, "\n", g);
     }
 
     /// Returns whether the given grapheme is whitespace.
+    ///
     /// Newlines return false to aid tokenisation.
-    fn isWhitespace(self: *const @This(), g: Grphm) bool {
+    fn isWhitespace(self: *const @This(), g: GraphemeCluster) bool {
         if (isNewLine(self, g)) return false;
         for (g) |code_point| if (!self.props_data.isWhitespace(code_point)) return false;
         return true;
     }
 
     /// Returns whether the given grapheme is part of a word.
-    fn isWord(self: *const @This(), g: Grphm) bool {
+    fn isWord(self: *const @This(), g: GraphemeCluster) bool {
         return !self.isSpecial(g) and !self.isWhitespace(g) and !self.isNewLine(g);
     }
 
     /// Returns what type of delimiter the given grapheme is.
+    ///
     /// Returns `.none` if the grapheme isn't a delimiter.
-    fn getDelimiterSide(self: *const @This(), g: Grphm) enum { right, left, balanced, none } {
-        for (self.delimiter_pairs) |pair| {
-            if (std.mem.eql(u8, pair[0], g)) return .left;
-            if (std.mem.eql(u8, pair[1], g)) return .right;
-        }
-
-        for (self.balanced_delimiters) |d_g| {
-            if (std.mem.eql(u8, d_g, g)) return .balanced;
-        }
-
+    fn getDelimiterSide(self: *const @This(), g: GraphemeCluster) enum { start, end, balanced, none } {
+        if (self.start_delimiters.contains(g)) return .start;
+        if (self.end_delimiters.contains(g)) return .end;
+        if (self.balanced_delimiters.contains(g)) return .balanced;
         return .none;
     }
 
-    /// Returns true if s ends with a single line comment start
-    fn endsWithSingleLineCommentStart(self: *const @This(), s: Str) bool {
+    /// Returns true if `s` ends with a `single_line_comment` start
+    fn endsWithSingleLineCommentStart(self: *const @This(), s: []const GraphemeCluster) bool {
         if (self.single_line_comment == null) return false;
-        return strEndsWith(s, self.single_line_comment.?);
+        return graphemeClustersEndWith(s, self.single_line_comment.?);
     }
 
-    /// Returns true if s ends with a multi line comment start
-    fn endsWithMultiLineCommentStart(self: *const @This(), s: Str) bool {
+    /// Returns true if `s` ends with a `multi_line_comment` start
+    fn endsWithMultiLineCommentStart(self: *const @This(), s: []const GraphemeCluster) bool {
         if (self.multi_line_comment == null) return false;
-        return strEndsWith(s, self.multi_line_comment.?[0]);
+        return graphemeClustersEndWith(s, self.multi_line_comment.?[0]);
     }
 
-    /// Returns true if s ends with a multi line comment end
-    fn endsWithMultiLineCommentEnd(self: *const @This(), s: Str) bool {
+    /// Returns true if `s` ends with a `multi_line_comment` end
+    fn endsWithMultiLineCommentEnd(self: *const @This(), s: []const GraphemeCluster) bool {
         std.debug.assert(self.multi_line_comment != null);
-        return strEndsWith(s, self.multi_line_comment.?[1]);
+        return graphemeClustersEndWith(s, self.multi_line_comment.?[1]);
     }
 
-    /// A helper function that converts the input `Str` to bytes, combines it with `state` into a `Token`,
+    /// A helper function that combines the slice of `GraphemeCluster` into a slice of `u8`,
+    /// combines it with `state` into a `Token`,
     /// and appends the token to `out`.
-    fn addToken(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(Token), state: TokenState, value: Str) std.mem.Allocator.Error!void {
-        const value_bytes = try strToBytes(gpa, value);
+    fn addToken(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(Token), state: TokenState, value: []const GraphemeCluster) std.mem.Allocator.Error!void {
+        const value_bytes = try fromGraphemeCluster(gpa, value);
         errdefer gpa.free(value_bytes);
         try out.append(gpa, .{ .state = state, .value = value_bytes });
     }
 
-    /// Take a input string `raw_text` and tokenise it into a slice of tokens.
-    /// The caller owns the returned slice and should both free it and call `deinit` on each of the tokens within.
-    pub fn tokenise(self: *const @This(), gpa: std.mem.Allocator, raw_text: []const u8) TokeniserError![]Token {
-        const text: Str = try bytesToStr(gpa, &self.grapheme_data, raw_text);
-        defer strFree(gpa, text);
+    /// Tokenises a string according to the configured rules.
+    ///
+    /// This is the main method of the library, converting a string into a sequence of tokens
+    /// based on the special characters, delimiters, and comment markers that have been configured.
+    ///
+    /// ### Arguments
+    ///
+    /// * `text` - The string to tokenise
+    ///
+    /// ### Returns
+    ///
+    /// * `[]Token` - A slice of `Token`. Owned by the caller, call deinit on each token to free.
+    ///
+    /// ### Example Start
+    /// ```
+    /// var tokeniser: Tokeniser = try .init(gpa);
+    /// defer tokeniser.deinit(gpa);
+    ///
+    /// try tokeniser.addSpecials(gpa, "+-*/=");
+    /// try tokeniser.addDelimiterPairs(gpa, &.{"()", "[]"});
+    /// try tokeniser.setSingleLineComment(gpa, "//");
+    ///
+    /// const source = "x = 42; // The answer";
+    /// const tokens = try tokeniser.tokenise(gpa, source);
+    ///
+    /// // We can now work with the tokens
+    /// for (tokens) |token| {
+    ///     switch (token.state) {
+    ///         .word => std.debug.print("Word: {s}\n", .{token.value}),
+    ///         .symbol_string => std.debug.print("Symbol String: {s}\n", .{token.value});
+    ///         .single_line_comment => std.debug.print("Single Line Comment: {s}\n", .{token.value}),
+    ///         inline else => std.debug.print("Other: {s}\n", .{token.value}),
+    ///     }
+    /// }
+    /// ```
+    /// ### Example End
+    pub fn tokenise(self: *const @This(), gpa: std.mem.Allocator, text: []const u8) TokeniserError![]Token {
+        const gcs_text: []const GraphemeCluster = try toGraphemeClusters(gpa, &self.grapheme_data, text);
+        defer freeGraphemeClusters(gpa, gcs_text);
 
         var out: std.ArrayListUnmanaged(Token) = .empty;
         errdefer out.deinit(gpa);
@@ -404,7 +797,7 @@ pub const Tokeniser = struct {
         var current_start: usize = 0;
         var state: TokenState = .none;
 
-        for (text, 0..) |g, i| {
+        for (gcs_text, 0..) |g, i| {
             state_switch: switch (state) {
                 .none => {
                     std.debug.assert(current_start == i);
@@ -423,13 +816,13 @@ pub const Tokeniser = struct {
                         }
 
                         switch (self.getDelimiterSide(g)) {
-                            .left => {
-                                try @This().addToken(gpa, &out, .left_delimiter, &.{g});
+                            .start => {
+                                try @This().addToken(gpa, &out, .start_delimiter, &.{g});
                                 current_start += 1;
                                 continue;
                             },
-                            .right => {
-                                try @This().addToken(gpa, &out, .right_delimiter, &.{g});
+                            .end => {
+                                try @This().addToken(gpa, &out, .end_delimiter, &.{g});
                                 current_start += 1;
                                 continue;
                             },
@@ -472,14 +865,14 @@ pub const Tokeniser = struct {
 
                     // The `.word` is over, push the token and reset `state` to `.none`
                     // and jump to the `.none` branch to handle the lastest grapheme.
-                    try @This().addToken(gpa, &out, .word, text[current_start..i]);
+                    try @This().addToken(gpa, &out, .word, gcs_text[current_start..i]);
                     state = .none;
                     current_start = i;
                     continue :state_switch state;
                 },
                 .symbol_string => {
                     if (self.isSpecial(g)) {
-                        const curr_str = text[current_start .. i + 1];
+                        const curr_str = gcs_text[current_start .. i + 1];
 
                         if (self.endsWithSingleLineCommentStart(curr_str)) {
                             // We've got the start of a `.single_line_comment`.
@@ -488,7 +881,7 @@ pub const Tokeniser = struct {
                             if (curr_str.len > self.single_line_comment.?.len) {
                                 // There's a token before the comment opening, push it.
                                 const new_start: usize = i + 1 - self.single_line_comment.?.len;
-                                try @This().addToken(gpa, &out, .symbol_string, text[current_start..new_start]);
+                                try @This().addToken(gpa, &out, .symbol_string, gcs_text[current_start..new_start]);
                                 current_start = new_start;
                             }
 
@@ -502,7 +895,7 @@ pub const Tokeniser = struct {
                             if (curr_str.len > self.multi_line_comment.?[0].len) {
                                 // There's a token before the comment opening, push it.
                                 const new_start: usize = i + 1 - self.multi_line_comment.?[0].len;
-                                try @This().addToken(gpa, &out, .symbol_string, text[current_start..new_start]);
+                                try @This().addToken(gpa, &out, .symbol_string, gcs_text[current_start..new_start]);
                                 current_start = new_start;
                             }
 
@@ -517,7 +910,7 @@ pub const Tokeniser = struct {
                             inline else => {
                                 // The `.symbol_string` is over, push the token and reset `state` to `.none`
                                 // and jump to the `.none` branch to handle the lastest grapheme.
-                                try @This().addToken(gpa, &out, .symbol_string, text[current_start..i]);
+                                try @This().addToken(gpa, &out, .symbol_string, gcs_text[current_start..i]);
                                 state = .none;
                                 current_start = i;
                                 continue :state_switch state;
@@ -528,7 +921,7 @@ pub const Tokeniser = struct {
 
                     // The `.symbol_string` is over, push the token and reset `state` to `.none`
                     // and jump to the `.none` branch to handle the lastest grapheme.
-                    try @This().addToken(gpa, &out, .symbol_string, text[current_start..i]);
+                    try @This().addToken(gpa, &out, .symbol_string, gcs_text[current_start..i]);
                     state = .none;
                     current_start = i;
                     continue :state_switch state;
@@ -541,7 +934,7 @@ pub const Tokeniser = struct {
 
                     // The `.whitespace` is over, push the token and reset `state` to `.none`
                     // and jump to the `.none` branch to handle the lastest grapheme.
-                    try @This().addToken(gpa, &out, .whitespace, text[current_start..i]);
+                    try @This().addToken(gpa, &out, .whitespace, gcs_text[current_start..i]);
                     current_start = i;
                     state = .none;
                     continue :state_switch state;
@@ -556,7 +949,7 @@ pub const Tokeniser = struct {
 
                     // The `.single_line_comment` is over, push the token and reset `state` to `.none`
                     // and jump to the `.none` branch to handle the lastest grapheme.
-                    try @This().addToken(gpa, &out, .single_line_comment, text[current_start..i]);
+                    try @This().addToken(gpa, &out, .single_line_comment, gcs_text[current_start..i]);
                     current_start = i;
                     state = .none;
                     continue :state_switch state;
@@ -564,7 +957,7 @@ pub const Tokeniser = struct {
                 .multi_line_comment => {
                     std.debug.assert(self.multi_line_comment != null);
 
-                    const current_str = text[current_start .. i + 1];
+                    const current_str = gcs_text[current_start .. i + 1];
 
                     // Make sure to exclude the starting delimiter to avoid cases like `/*/` for `/*` and `*/`.
                     if (!self.endsWithMultiLineCommentEnd(current_str[self.multi_line_comment.?[0].len..])) {
@@ -581,12 +974,12 @@ pub const Tokeniser = struct {
             }
         }
 
-        if (current_start != text.len) switch (state) {
+        if (current_start != gcs_text.len) switch (state) {
             // We've not pushed the last token, check it's valid and then do so.
-            .symbol_string => try @This().addToken(gpa, &out, .symbol_string, text[current_start..]),
-            .whitespace => try @This().addToken(gpa, &out, .whitespace, text[current_start..]),
-            .word => try @This().addToken(gpa, &out, .word, text[current_start..]),
-            .single_line_comment => try @This().addToken(gpa, &out, .single_line_comment, text[current_start..]),
+            .symbol_string => try @This().addToken(gpa, &out, .symbol_string, gcs_text[current_start..]),
+            .whitespace => try @This().addToken(gpa, &out, .whitespace, gcs_text[current_start..]),
+            .word => try @This().addToken(gpa, &out, .word, gcs_text[current_start..]),
+            .single_line_comment => try @This().addToken(gpa, &out, .single_line_comment, gcs_text[current_start..]),
             inline else => return TokeniserError.MalformedText,
         };
 
@@ -594,45 +987,61 @@ pub const Tokeniser = struct {
     }
 };
 
-test "tokeniser init works" {
-    const tokeniser: Tokeniser = try .init(
-        std.testing.allocator,
-        "!@%👨‍💻<>(){}🇺🇸👋🏽\"/*",
-        &.{ "<>", "()", "{}", "🇺🇸👋🏽" },
-        "\"",
-        "//",
-        .{ "/*", "*/" },
-    );
+test "tokeniser setup works" {
+    var tokeniser = try Tokeniser.init(std.testing.allocator);
     defer tokeniser.deinit(std.testing.allocator);
 
-    const special: []const []const u8 = &.{ "!", "@", "%", "👨‍💻", "<", ">", "(", ")", "{", "}", "🇺🇸", "👋🏽", "\"", "/", "*" };
-    try std.testing.expectEqualDeep(special, tokeniser.special_characters);
+    try tokeniser.addSpecials(std.testing.allocator, "!@%");
+    try tokeniser.addDelimiterPairs(std.testing.allocator, &.{ "<>", "()", "{}", "🇺🇸👋🏽" });
+    try tokeniser.addBalancedDelimiter(std.testing.allocator, "\"");
+    try tokeniser.setSingleLineComment(std.testing.allocator, "//");
+    try tokeniser.setMultiLineComment(std.testing.allocator, "/*", "*/");
 
-    const delimiter_pairs: []const [2][]const u8 = &.{
-        [2][]const u8{ "<", ">" },
-        [2][]const u8{ "(", ")" },
-        [2][]const u8{ "{", "}" },
-        [2][]const u8{ "🇺🇸", "👋🏽" },
-    };
-    try std.testing.expectEqualDeep(delimiter_pairs, tokeniser.delimiter_pairs);
+    try std.testing.expect(tokeniser.specials.count() == 14);
+    try std.testing.expect(tokeniser.specials.contains("!"));
+    try std.testing.expect(tokeniser.specials.contains("@"));
+    try std.testing.expect(tokeniser.specials.contains("%"));
+    try std.testing.expect(tokeniser.specials.contains("<"));
+    try std.testing.expect(tokeniser.specials.contains(">"));
+    try std.testing.expect(tokeniser.specials.contains("("));
+    try std.testing.expect(tokeniser.specials.contains(")"));
+    try std.testing.expect(tokeniser.specials.contains("{"));
+    try std.testing.expect(tokeniser.specials.contains("}"));
+    try std.testing.expect(tokeniser.specials.contains("🇺🇸"));
+    try std.testing.expect(tokeniser.specials.contains("👋🏽"));
+    try std.testing.expect(tokeniser.specials.contains("\""));
+    try std.testing.expect(tokeniser.specials.contains("/"));
+    try std.testing.expect(tokeniser.specials.contains("*"));
 
-    const single_line_comment: []const []const u8 = &.{ "/", "/" };
-    try std.testing.expectEqualDeep(single_line_comment, tokeniser.single_line_comment.?);
+    try std.testing.expect(tokeniser.start_delimiters.count() == 4);
+    try std.testing.expect(tokeniser.start_delimiters.contains("<"));
+    try std.testing.expect(tokeniser.start_delimiters.contains("("));
+    try std.testing.expect(tokeniser.start_delimiters.contains("{"));
+    try std.testing.expect(tokeniser.start_delimiters.contains("🇺🇸"));
 
-    const multi_line_comment = [2][]const []const u8{ &.{ "/", "*" }, &.{ "*", "/" } };
-    try std.testing.expectEqualDeep(multi_line_comment, tokeniser.multi_line_comment.?);
+    try std.testing.expect(tokeniser.end_delimiters.count() == 4);
+    try std.testing.expect(tokeniser.end_delimiters.contains(">"));
+    try std.testing.expect(tokeniser.end_delimiters.contains(")"));
+    try std.testing.expect(tokeniser.end_delimiters.contains("}"));
+    try std.testing.expect(tokeniser.end_delimiters.contains("👋🏽"));
+
+    try std.testing.expect(tokeniser.balanced_delimiters.count() == 1);
+    try std.testing.expect(tokeniser.balanced_delimiters.contains("\""));
+
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "/", "/" }), tokeniser.single_line_comment.?);
+
+    try std.testing.expectEqualDeep([2][]const []const u8{ &.{ "/", "*" }, &.{ "*", "/" } }, tokeniser.multi_line_comment.?);
 }
 
-test "long tokeniser test" {
-    const tokeniser = try Tokeniser.init(
-        std.testing.allocator,
-        ",;=?.'*()[]/£<>@🇺🇸👋🏽\"",
-        &.{ "()", "[]" },
-        "\"",
-        "//",
-        .{ "🇺🇸", "👋🏽" },
-    );
+test "long tokenise test" {
+    var tokeniser = try Tokeniser.init(std.testing.allocator);
     defer tokeniser.deinit(std.testing.allocator);
+
+    try tokeniser.addSpecials(std.testing.allocator, ",;=?.'*£<>@");
+    try tokeniser.addDelimiterPairs(std.testing.allocator, &.{ "()", "[]" });
+    try tokeniser.addBalancedDelimiter(std.testing.allocator, "\"");
+    try tokeniser.setSingleLineComment(std.testing.allocator, "//");
+    try tokeniser.setMultiLineComment(std.testing.allocator, "🇺🇸", "👋🏽");
 
     const source: []const u8 = " hi, skdjfs;;    842\t 39fsl == 3\r\n what's going on? idk... \rfire___sldfksfl // what's going on? \nidk what I'm 🇺🇸doing \n\nnow👋🏽 hi £*$*@ \nhelp!\n\"hello\"hi";
 
@@ -744,20 +1153,20 @@ fn test_token_combination(tokeniser: Tokeniser, comptime token_a: Token, comptim
     try std.testing.expectEqualDeep(expected_tokens, tokens);
 }
 
-test "tokeniser singular and combination test" {
+test "singular and combination tokenise test" {
     const word_tokens = [_]Token{
         Token{ .state = .word, .value = "a" },
         Token{ .state = .word, .value = "A" },
     };
 
-    const left_delimiter_tokens = [_]Token{
-        Token{ .state = .left_delimiter, .value = "(" },
-        Token{ .state = .left_delimiter, .value = "[" },
+    const start_delimiter_tokens = [_]Token{
+        Token{ .state = .start_delimiter, .value = "(" },
+        Token{ .state = .start_delimiter, .value = "[" },
     };
 
-    const right_delimiter_tokens = [_]Token{
-        Token{ .state = .right_delimiter, .value = ")" },
-        Token{ .state = .right_delimiter, .value = "]" },
+    const end_delimiter_tokens = [_]Token{
+        Token{ .state = .end_delimiter, .value = ")" },
+        Token{ .state = .end_delimiter, .value = "]" },
     };
 
     const balanced_delimiter_tokens = [_]Token{
@@ -820,15 +1229,14 @@ test "tokeniser singular and combination test" {
         Token{ .state = .multi_line_comment, .value = "/*/*/" },
     };
 
-    const tokeniser = try Tokeniser.init(
-        std.testing.allocator,
-        ";()[]\"'/*",
-        &.{ "()", "[]" },
-        "\"'",
-        "//",
-        .{ "/*", "*/" },
-    );
+    var tokeniser = try Tokeniser.init(std.testing.allocator);
     defer tokeniser.deinit(std.testing.allocator);
+
+    try tokeniser.addSpecials(std.testing.allocator, ";");
+    try tokeniser.addDelimiterPairs(std.testing.allocator, &.{ "()", "[]" });
+    try tokeniser.addBalancedDelimiters(std.testing.allocator, "\"'");
+    try tokeniser.setSingleLineComment(std.testing.allocator, "//");
+    try tokeniser.setMultiLineComment(std.testing.allocator, "/*", "*/");
 
     @setEvalBranchQuota(50000);
 
@@ -836,8 +1244,8 @@ test "tokeniser singular and combination test" {
         try test_token_singular(tokeniser, a);
         // Tokenising two `.word`s should combine them into a single token.
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .word, .value = a.value ++ b.value }});
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -846,11 +1254,11 @@ test "tokeniser singular and combination test" {
         inline for (multi_line_comment_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
     }
 
-    inline for (left_delimiter_tokens) |a| {
+    inline for (start_delimiter_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -859,11 +1267,11 @@ test "tokeniser singular and combination test" {
         inline for (multi_line_comment_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
     }
 
-    inline for (right_delimiter_tokens) |a| {
+    inline for (end_delimiter_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -875,8 +1283,8 @@ test "tokeniser singular and combination test" {
     inline for (balanced_delimiter_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -888,8 +1296,8 @@ test "tokeniser singular and combination test" {
     inline for (symbol_string_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| {
             if (comptime std.mem.startsWith(u8, a.value ++ b.value, "//")) {
@@ -964,8 +1372,8 @@ test "tokeniser singular and combination test" {
     inline for (new_line_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| {
@@ -984,8 +1392,8 @@ test "tokeniser singular and combination test" {
     inline for (whitespace_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -999,8 +1407,8 @@ test "tokeniser singular and combination test" {
         try test_token_singular(tokeniser, a);
         // Until a `.new_line` is present, any tokens following a `.single_line_comment` opening should be part of the comment.
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{Token{ .state = .single_line_comment, .value = a.value ++ b.value }});
         // A `.new_line` should both close the `.single_line_comment` and preserve the `.new_line`.
@@ -1027,8 +1435,8 @@ test "tokeniser singular and combination test" {
     inline for (multi_line_comment_tokens) |a| {
         try test_token_singular(tokeniser, a);
         inline for (word_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (left_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
-        inline for (right_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (start_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
+        inline for (end_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (balanced_delimiter_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (symbol_string_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (new_line_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
@@ -1036,106 +1444,4 @@ test "tokeniser singular and combination test" {
         inline for (single_line_comment_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
         inline for (multi_line_comment_tokens) |b| try test_token_combination(tokeniser, a, b, &[_]Token{ a, b });
     }
-}
-
-test "tokeniser well formed test" {
-    // DelimiterPairsPairLengthMustBeTwo,
-    try std.testing.expectError(Tokeniser.InitError.DelimiterPairsPairLengthMustBeTwo, Tokeniser.init(std.testing.allocator, "()!", &.{""}, "", null, null));
-    try std.testing.expectError(Tokeniser.InitError.DelimiterPairsPairLengthMustBeTwo, Tokeniser.init(std.testing.allocator, "()!", &.{"("}, "", null, null));
-    try std.testing.expectError(Tokeniser.InitError.DelimiterPairsPairLengthMustBeTwo, Tokeniser.init(std.testing.allocator, "()!", &.{"()!"}, "", null, null));
-
-    // SpecialCharactersMustNotBeNewLines,
-    try std.testing.expectError(Tokeniser.InitError.SpecialCharactersMustNotBeNewLines, Tokeniser.init(std.testing.allocator, "\r\n", &.{}, "", null, null));
-    try std.testing.expectError(Tokeniser.InitError.SpecialCharactersMustNotBeNewLines, Tokeniser.init(std.testing.allocator, "\r", &.{}, "", null, null));
-    try std.testing.expectError(Tokeniser.InitError.SpecialCharactersMustNotBeNewLines, Tokeniser.init(std.testing.allocator, "\n", &.{}, "", null, null));
-
-    // SpecialCharactersMustNotBeWhitespace,
-    try std.testing.expectError(Tokeniser.InitError.SpecialCharactersMustNotBeWhitespace, Tokeniser.init(std.testing.allocator, "\t", &.{}, "", null, null));
-    try std.testing.expectError(Tokeniser.InitError.SpecialCharactersMustNotBeWhitespace, Tokeniser.init(std.testing.allocator, " ", &.{}, "", null, null));
-
-    // DelimitersPairStartsMustBeSpecial,
-    try std.testing.expectError(Tokeniser.InitError.DelimitersPairStartsMustBeSpecial, Tokeniser.init(std.testing.allocator, ")", &.{"()"}, "", null, null));
-
-    // DelimitersPairEndsMustBeSpecial,
-    try std.testing.expectError(Tokeniser.InitError.DelimitersPairEndsMustBeSpecial, Tokeniser.init(std.testing.allocator, "(", &.{"()"}, "", null, null));
-
-    // BalancedDelimitersMustBeSpecial,
-    try std.testing.expectError(Tokeniser.InitError.BalancedDelimitersMustBeSpecial, Tokeniser.init(std.testing.allocator, "", &.{}, "\"", null, null));
-
-    // BalancedDelimitersMustNotBeDelimiterPairStarts,
-    try std.testing.expectError(Tokeniser.InitError.BalancedDelimitersMustNotBeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()", &.{"()"}, "(", null, null));
-
-    // BalancedDelimitersMustNotBeDelimiterPairEnds,
-    try std.testing.expectError(Tokeniser.InitError.BalancedDelimitersMustNotBeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()", &.{"()"}, ")", null, null));
-
-    // SingleLineCommentMustBeLongerThanZero,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustBeLongerThanZero, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "", null));
-
-    // SingleLineCommentMustBeEntirelySpecial,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, "", &.{}, "", "<", null));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, "<", &.{}, "", "<!", null));
-
-    // SingleLineCommentMustNotIncludeDelimiterPairStarts,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", "(", null));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", "/(", null));
-
-    // SingleLineCommentMustNotIncludeDelimiterPairEnds,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", ")", null));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", "/)", null));
-
-    // SingleLineCommentMustNotIncludeBalancedDelimiters,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", "\"", null));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()/\"", &.{"()"}, "\"", "/\"", null));
-
-    // SingleLineCommentMustNotContainMultiLineCommentStart,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotContainMultiLineCommentStart, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "/*", .{ "/*", "*/" }));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotContainMultiLineCommentStart, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "//*", .{ "/*", "*/" }));
-
-    // SingleLineCommentMustNotContainMultiLineCommentEnd,
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotContainMultiLineCommentEnd, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "*/", .{ "/*", "*/" }));
-    try std.testing.expectError(Tokeniser.InitError.SingleLineCommentMustNotContainMultiLineCommentEnd, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "*//", .{ "/*", "*/" }));
-
-    // MultiLineCommentStartMustBeLongerThanZero,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustBeLongerThanZero, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", null, .{ "", "*/" }));
-
-    // MultiLineCommentStartMustBeEntirelySpecial,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, ">", &.{}, "", null, .{ "<", ">" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, "<>", &.{}, "", null, .{ "<!", ">" }));
-
-    // MultiLineCommentStartMustNotIncludeDelimiterPairStarts,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "(", ">" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "/(", ">" }));
-
-    // MultiLineCommentStartMustNotIncludeDelimiterPairEnds,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ ")", ">" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "/)", ">" }));
-
-    // MultiLineCommentStartMustNotIncludeBalancedDelimiters,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "\"", ">" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "/\"", ">" }));
-
-    // MultiLineCommentEndMustBeLongerThanZero,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustBeLongerThanZero, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", null, .{ "/*", "" }));
-
-    // MultiLineCommentEndMustBeEntirelySpecial,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, "<", &.{}, "", null, .{ "<", ">" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustBeEntirelySpecial, Tokeniser.init(std.testing.allocator, "<>", &.{}, "", null, .{ "<", "!>" }));
-
-    // MultiLineCommentEndMustNotIncludeDelimiterPairStarts,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", "(" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeDelimiterPairStarts, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", "/(" }));
-
-    // MultiLineCommentEndMustNotIncludeDelimiterPairEnds,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", ")" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeDelimiterPairEnds, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", "/)" }));
-
-    // MultiLineCommentEndMustNotIncludeBalancedDelimiters,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", "\"" }));
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotIncludeBalancedDelimiters, Tokeniser.init(std.testing.allocator, "()<>/\"", &.{"()"}, "\"", null, .{ "<", "/\"" }));
-
-    // MultiLineCommentStartMustNotContainSingleLineComment,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentStartMustNotContainSingleLineComment, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "//", .{ "//*", "*/" }));
-
-    // MultiLineCommentEndMustNotContainSingleLineComment,
-    try std.testing.expectError(Tokeniser.InitError.MultiLineCommentEndMustNotContainSingleLineComment, Tokeniser.init(std.testing.allocator, "/*", &.{}, "", "//", .{ "/*", "*//" }));
 }
